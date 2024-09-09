@@ -20,9 +20,10 @@
  * IN THE SOFTWARE.
  */
 
-import { createHash } from "crypto"
+import { BinaryLike, createHash } from "crypto"
 import { build as esbuild } from "esbuild"
 import * as fs from "fs/promises"
+import { transform } from "lightningcss"
 import * as path from "path"
 import postcss from "postcss"
 import {
@@ -74,7 +75,7 @@ const root = new RegExp(`file://${path.resolve(".")}/`, "g")
  *
  * @returns File with digest
  */
-function digest(file: string, data: string): string {
+function digest(file: string, data: BinaryLike | string): string {
   if (process.argv.includes("--optimize")) {
     const hash = createHash("sha256").update(data).digest("hex")
     return file.replace(/\b(?=\.)/, `.${hash.slice(0, 8)}.min`)
@@ -117,10 +118,7 @@ export function transformStyle(
             `${base}/templates/.icons`
           ],
           encode: false
-        }),
-        ...process.argv.includes("--optimize")
-          ? [require("cssnano")]
-          : []
+        })
       ])
         .process(css, {
           from: options.from,
@@ -135,13 +133,20 @@ export function transformStyle(
         console.log(err.formatted || err.message)
         return EMPTY
       }),
-      switchMap(({ css, map }) => {
-        const file = digest(options.to, css)
+      switchMap(({ css, map }) => of(transform({
+        code: Buffer.from(css),
+        filename: options.from,
+        minify: true,
+        sourceMap: false,
+        inputSourceMap: map.toString()
+      }))),
+      switchMap(({ code, map }) => {
+        const file = digest(options.to, code)
         return concat(
           mkdir(path.dirname(file)),
           merge(
             write(`${file}.map`, `${map}`.replace(root, "")),
-            write(`${file}`, css.replace(
+            write(`${file}`, code.toString().replace(
               options.from,
               path.basename(file)
             )),
@@ -180,15 +185,16 @@ export function transformScript(
         name: "mkdocs-material/inline",
         setup(build) {
           build.onLoad({ filter: /\.css/ }, async args => {
-            const content = await fs.readFile(args.path, "utf8")
-            const { css } = await postcss([require("cssnano")])
-              .process(content, {
-                from: undefined
-              })
+            const { code } = transform({
+              code: await fs.readFile(args.path),
+              filename: args.path,
+              minify: true,
+              sourceMap: false
+            })
 
             /* Return minified CSS */
             return {
-              contents: css,
+              contents: code,
               loader: "text"
             }
           })
